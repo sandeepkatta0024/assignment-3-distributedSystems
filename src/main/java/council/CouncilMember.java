@@ -1,6 +1,7 @@
 package council;
 
 import java.io.*;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.time.Instant;
@@ -9,6 +10,9 @@ import java.util.concurrent.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
+/**
+ * Single-decree Paxos participant implementing proposer, acceptor, and learner roles.
+ */
 public class CouncilMember {
     private static final int MEMBERS = 9;
     private static final int QUORUM = MEMBERS / 2 + 1; // 5
@@ -28,7 +32,7 @@ public class CouncilMember {
     private final ScheduledExecutorService sched = Executors.newScheduledThreadPool(2);
     private final ExecutorService workers = Executors.newFixedThreadPool(4);
     private final Object proposerLock = new Object();
-    private long localCounter = 0; // for proposal numbers
+    private long localCounter = 0;
     private ProposerRound currentRound = null;
 
     // learner
@@ -42,8 +46,7 @@ public class CouncilMember {
     }
 
     private long nextProposalNumber() {
-        // n = counter * STRIDE + memberNumericId to total order by counter then tie-break by id
-        int idNum = Integer.parseInt(myId.substring(1)); // "M7" -> 7
+        int idNum = Integer.parseInt(myId.substring(1));
         localCounter++;
         return localCounter * PROPOSAL_STRIDE + idNum;
     }
@@ -52,7 +55,10 @@ public class CouncilMember {
         NetworkConfig.Entry me = cfg.map.get(myId);
         if (me == null) throw new IllegalArgumentException("No config for " + myId);
 
-        ServerSocket server = new ServerSocket(me.port);
+        ServerSocket server = new ServerSocket();
+        server.setReuseAddress(true);
+        server.bind(new InetSocketAddress(me.port));
+
         Thread acceptThread = new Thread(() -> {
             while (true) {
                 try {
@@ -64,25 +70,45 @@ public class CouncilMember {
         acceptThread.setDaemon(true);
         acceptThread.start();
 
-        // stdin thread to trigger proposals
-        Thread stdin = new Thread(this::stdinLoop, "stdin-" + myId);
-        stdin.setDaemon(true);
-        stdin.start();
-
         System.out.printf("%s listening on %d at %s%n", myId, me.port, Instant.now());
     }
 
-    private void stdinLoop() {
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(System.in))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                String candidate = line.trim();
-                if (candidate.isEmpty()) continue;
-                propose(candidate);
+    private void handleConnection(Socket s) {
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(s.getInputStream()))) {
+            String line = br.readLine();
+            if (line == null) return;
+            profile.delayBeforeHandling();
+            if (profile.shouldDrop()) return;
+            Message m = Message.parse(line);
+            switch (m.type) {
+                case PROPOSE -> onProposeRequest(m);  // NEW
+                case PREPARE -> onPrepare(m);
+                case PROMISE -> onPromise(m);
+                case REJECT -> onReject(m);
+                case ACCEPT_REQUEST -> onAcceptRequest(m);
+                case ACCEPTED -> onAccepted(m);
+                case DECIDE -> onDecide(m);
+                default -> {}
             }
-        } catch (IOException ignored) {}
+        } catch (Exception e) {
+            // Log parse errors for debugging
+            log("ERROR parsing message: " + e.getMessage());
+        }
     }
 
+    /**
+     * Handle incoming PROPOSE request from external trigger.
+     * @param m The PROPOSE message containing candidate value
+     */
+    private void onProposeRequest(Message m) {
+        log("Received PROPOSE request for candidate: " + m.v);
+        propose(m.v);
+    }
+
+    /**
+     * Initiate Phase 1 for a value.
+     * @param value The candidate to propose for election
+     */
     public void propose(String value) {
         synchronized (proposerLock) {
             if (decidedValue != null) {
@@ -92,8 +118,20 @@ public class CouncilMember {
             long n = nextProposalNumber();
             currentRound = new ProposerRound(n, myId, value);
             broadcast(Message.prepare(myId, n));
-            schedulePrepareTimeout(n);
             logSend("BROADCAST", MessageType.PREPARE, "*", n, value, null, null, null);
+
+            // Crash simulation for failure profile
+            if (profile.shouldCrashAfterPrepare()) {
+                log("CRASH: Failure profile terminating after PREPARE");
+                // Schedule crash after a brief delay to allow PREPARE messages to be sent
+                sched.schedule(() -> {
+                    log("EXITING NOW");
+                    System.exit(1);
+                }, 100, TimeUnit.MILLISECONDS);
+                return; // Don't schedule timeout - we're crashing
+            }
+
+            schedulePrepareTimeout(n);
         }
     }
 
@@ -127,25 +165,6 @@ public class CouncilMember {
         }, ACCEPT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     }
 
-    private void handleConnection(Socket s) {
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(s.getInputStream()))) {
-            String line = br.readLine();
-            if (line == null) return;
-            profile.delayBeforeHandling();
-            if (profile.shouldDrop()) return;
-            Message m = Message.parse(line);
-            switch (m.type) {
-                case PREPARE -> onPrepare(m);
-                case PROMISE -> onPromise(m);
-                case REJECT -> onReject(m);
-                case ACCEPT_REQUEST -> onAcceptRequest(m);
-                case ACCEPTED -> onAccepted(m);
-                case DECIDE -> onDecide(m);
-                default -> {}
-            }
-        } catch (Exception ignored) {}
-    }
-
     private void onPrepare(Message m) {
         if (decidedValue != null) {
             sendTo(m.from, Message.decide(myId, decidedValue));
@@ -159,10 +178,6 @@ public class CouncilMember {
             String aV = (String) res[2];
             sendTo(m.from, Message.promise(myId, m.n, aN, aV));
             logSend("SEND", MessageType.PROMISE, m.from, m.n, null, aN, aV, null);
-            if (profile == Profile.failure && profile.shouldCrashAfterPrepare()) {
-                log("CRASH after PREPARE as failure profile");
-                System.exit(0);
-            }
         } else {
             long higher = (Long) res[1];
             sendTo(m.from, Message.reject(myId, higher));
@@ -179,11 +194,8 @@ public class CouncilMember {
         Object[] res = (Object[]) acceptor.onAcceptRequest(m.n, m.v);
         boolean ok = (Boolean) res[0];
         if (ok) {
-            sendTo(m.from, Message.accepted(myId, m.n, m.v));
             broadcast(Message.accepted(myId, m.n, m.v));
-            logSend("SEND", MessageType.ACCEPTED, m.from, m.n, m.v, null, null, null);
             logSend("BROADCAST", MessageType.ACCEPTED, "*", m.n, m.v, null, null, null);
-            // Count own acceptance if I'm the current proposer for this round
             synchronized (proposerLock) {
                 if (currentRound != null && currentRound.n == m.n) {
                     currentRound.recordAccepted(myId, m.v);
@@ -247,7 +259,7 @@ public class CouncilMember {
     private void onDecide(Message m) {
         decideLocal(m.v);
         if (relayedDecisions.add(m.v)) {
-            broadcast(Message.decide(myId, m.v)); // one-time relay to help late learners
+            broadcast(Message.decide(myId, m.v));
             logSend("BROADCAST", MessageType.DECIDE, "*", NO_ROUND, m.v, null, null, null);
         }
         log("LEARN v=" + m.v);
@@ -304,7 +316,6 @@ public class CouncilMember {
         NetworkConfig cfg = NetworkConfig.load(configPath);
         CouncilMember m = new CouncilMember(myId, profile, cfg);
         m.start();
-        // Keep main alive
         Thread.currentThread().join();
     }
 }

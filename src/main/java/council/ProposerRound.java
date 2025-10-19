@@ -2,6 +2,9 @@ package council;
 
 import java.util.*;
 
+/**
+ * Tracks state for a single proposer round n.
+ */
 public class ProposerRound {
     public final long n;
     public final String myId;

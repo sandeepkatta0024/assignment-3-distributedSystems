@@ -22,6 +22,11 @@ public class Message {
         this.higherN = higherN;
     }
 
+    // NEW: Create a PROPOSE message
+    public static Message propose(String from, String v) {
+        return new Message(MessageType.PROPOSE, from, -1, v, null, null, null);
+    }
+
     public static Message prepare(String from, long n) {
         return new Message(MessageType.PREPARE, from, n, null, null, null, null);
     }
@@ -41,7 +46,6 @@ public class Message {
         return new Message(MessageType.DECIDE, from, -1, v, null, null, null);
     }
 
-    // Simple line protocol: key=value pairs separated by ';'
     public String serialize() {
         Map<String, String> m = new HashMap<>();
         m.put("type", type.name());
@@ -77,6 +81,7 @@ public class Message {
         String aV = m.get("acceptedV");
         Long hN = m.containsKey("higherN") ? Long.parseLong(m.get("higherN")) : null;
         switch (type) {
+            case PROPOSE: return propose(from, v);  // NEW
             case PREPARE: return prepare(from, n);
             case PROMISE: return promise(from, n, aN, aV);
             case REJECT: return reject(from, hN != null ? hN : -1L);
