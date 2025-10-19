@@ -5,7 +5,7 @@ CONFIG="network.config"
 COMPILE_DIR="target/classes"
 
 cleanup() {
-  echo "🧹 Cleaning up..."
+  echo "Cleaning up..."
   pkill -9 -f "council.CouncilMember" 2>/dev/null || true
   sleep 2
 }
@@ -55,11 +55,11 @@ echo "M4 proposes M5"
 send_proposal "M5" 9004
 sleep 5
 
-echo "✅ Checking consensus..."
+echo "Checking consensus..."
 if grep -h "CONSENSUS" logs/*.log 2>/dev/null; then
-  echo "✅ Scenario 1 PASSED"
+  echo "Scenario 1 PASSED"
 else
-  echo "❌ Scenario 1 FAILED - No consensus"
+  echo "Scenario 1 FAILED - No consensus"
   echo "Sample logs:"
   head -20 logs/M4.log
 fi
@@ -81,12 +81,12 @@ sleep 0.5
 send_proposal "M8" 9008 &
 sleep 8
 
-echo "✅ Checking consensus..."
+echo "Checking consensus..."
 if grep -h "CONSENSUS" logs/*.log 2>/dev/null | sort -u; then
   WINNER=$(grep -h "CONSENSUS" logs/*.log | head -1 | grep -oE 'M[1-9]')
-  echo "✅ Scenario 2 PASSED - Winner: $WINNER"
+  echo "Scenario 2 PASSED - Winner: $WINNER"
 else
-  echo "❌ Scenario 2 FAILED - No consensus"
+  echo "Scenario 2 FAILED - No consensus"
 fi
 
 cleanup
@@ -107,11 +107,11 @@ echo "M4 proposes M1"
 send_proposal "M1" 9004
 sleep 8
 
-echo "✅ Checking consensus..."
+echo "Checking consensus..."
 if grep -h "CONSENSUS" logs/*.log 2>/dev/null; then
-  echo "✅ Scenario 3a PASSED"
+  echo "Scenario 3a PASSED"
 else
-  echo "❌ Scenario 3a FAILED - No consensus"
+  echo "Scenario 3a FAILED - No consensus"
 fi
 
 cleanup
@@ -132,11 +132,11 @@ echo "M2 (latent) proposes M2"
 send_proposal "M2" 9002
 sleep 12
 
-echo "✅ Checking consensus..."
+echo "Checking consensus..."
 if grep -h "CONSENSUS" logs/*.log 2>/dev/null; then
-  echo "✅ Scenario 3b PASSED"
+  echo "Scenario 3b PASSED"
 else
-  echo "❌ Scenario 3b FAILED - No consensus"
+  echo "Scenario 3b FAILED - No consensus"
 fi
 
 cleanup
@@ -161,16 +161,16 @@ echo "M1 proposes M1 to recover"
 send_proposal "M1" 9001
 sleep 8
 
-echo "✅ Checking consensus..."
+echo "Checking consensus..."
 if grep -h "CONSENSUS" logs/*.log 2>/dev/null; then
-  echo "✅ Scenario 3c PASSED"
+  echo "Scenario 3c PASSED"
 else
-  echo "❌ Scenario 3c FAILED - No consensus"
+  echo "Scenario 3c FAILED - No consensus"
 fi
 
 echo ""
 echo "=========================================="
-echo "🎉 All scenarios complete!"
+echo "All scenarios complete!"
 echo "=========================================="
 echo "Log files:"
 ls -lh logs/

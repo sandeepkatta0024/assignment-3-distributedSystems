@@ -36,6 +36,4 @@ public class AcceptorState {
         }
     }
 
-    public synchronized Long getAcceptedN() { return acceptedN >= 0 ? acceptedN : null; }
-    public synchronized String getAcceptedV() { return acceptedV; }
 }

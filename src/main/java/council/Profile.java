@@ -4,16 +4,28 @@ import java.util.Random;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Network behavior profiles for simulating different member characteristics.
+ * Defines network behavior profiles for simulating different member characteristics.
+ * Each profile simulates different network conditions (latency, packet loss, failures).
  */
 public enum Profile {
-    reliable, latent, failure, standard;
+    /** No delays, no packet loss - ideal network conditions */
+    reliable,
+
+    /** High latency (200-1000ms), occasional packet loss (5%) */
+    latent,
+
+    /** Crashes after first PREPARE, high packet loss (25%) */
+    failure,
+
+    /** Moderate latency (20-220ms), minimal packet loss (2%) */
+    standard;
 
     private static final Random rnd = new Random();
     private final AtomicBoolean hasCrashed = new AtomicBoolean(false);
 
     /**
-     * Simulate network delay before handling incoming messages.
+     * Simulates network delay before handling an incoming message.
+     * The delay varies based on the profile type.
      */
     public void delayBeforeHandling() {
         switch (this) {
@@ -25,8 +37,9 @@ public enum Profile {
     }
 
     /**
-     * Determine if a message should be dropped (simulating packet loss).
-     * @return true if message should be dropped
+     * Determines if an incoming message should be dropped (simulating packet loss).
+     *
+     * @return true if the message should be dropped, false otherwise
      */
     public boolean shouldDrop() {
         return switch (this) {
@@ -38,17 +51,23 @@ public enum Profile {
     }
 
     /**
-     * For failure profile: determines if process should crash after sending PREPARE.
-     * Made deterministic for testing - crashes on first proposal only.
-     * @return true if should crash after sending PREPARE
+     * For failure profile only: determines if the process should crash after sending PREPARE.
+     * This is deterministic - crashes on the first proposal only to ensure testable behavior.
+     *
+     * @return true if the process should crash after sending PREPARE, false otherwise
      */
     public boolean shouldCrashAfterPrepare() {
         if (this == failure) {
-            return hasCrashed.compareAndSet(false, true);  // Crash only once
+            return hasCrashed.compareAndSet(false, true);
         }
         return false;
     }
 
+    /**
+     * Helper method to sleep for a specified duration.
+     *
+     * @param ms The number of milliseconds to sleep
+     */
     private static void sleep(long ms) {
         try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
     }

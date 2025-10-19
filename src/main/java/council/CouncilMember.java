@@ -11,11 +11,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * Single-decree Paxos participant implementing proposer, acceptor, and learner roles.
+ * Represents a single council member participating in the Adelaide Suburbs Council election.
+ * Each member acts as a proposer, acceptor, and learner in the Paxos consensus algorithm.
+ * Members communicate via TCP sockets and can have different network behaviors (profiles).
  */
 public class CouncilMember {
     private static final int MEMBERS = 9;
-    private static final int QUORUM = MEMBERS / 2 + 1; // 5
+    private static final int QUORUM = MEMBERS / 2 + 1; // 5 members needed for majority
     private static final long PREPARE_TIMEOUT_MS = 2500;
     private static final long ACCEPT_TIMEOUT_MS = 2500;
     private static final long NO_ROUND = -1L;
@@ -25,32 +27,52 @@ public class CouncilMember {
     private final Profile profile;
     private final NetworkConfig cfg;
 
-    // acceptor
+    // Acceptor state
     private final AcceptorState acceptor = new AcceptorState();
 
-    // proposer
+    // Proposer state
     private final ScheduledExecutorService sched = Executors.newScheduledThreadPool(2);
     private final ExecutorService workers = Executors.newFixedThreadPool(4);
     private final Object proposerLock = new Object();
     private long localCounter = 0;
     private ProposerRound currentRound = null;
 
-    // learner
+    // Learner state
     private volatile String decidedValue = null;
     private final Set<String> relayedDecisions = ConcurrentHashMap.newKeySet();
 
+    /**
+     * Creates a new council member with specified ID, network behavior profile, and configuration.
+     *
+     * @param myId The unique identifier for this member (e.g., "M1", "M2")
+     * @param profile The network behavior profile (reliable, latent, failure, or standard)
+     * @param cfg The network configuration mapping member IDs to host:port addresses
+     */
     public CouncilMember(String myId, Profile profile, NetworkConfig cfg) {
         this.myId = myId;
         this.profile = profile;
         this.cfg = cfg;
     }
 
+    /**
+     * Generates a unique, monotonically increasing proposal number for this member.
+     * The format is: (counter * 100) + memberNumericId
+     * This ensures total ordering with tie-breaking by member ID.
+     *
+     * @return A unique proposal number greater than all previous ones from this member
+     */
     private long nextProposalNumber() {
         int idNum = Integer.parseInt(myId.substring(1));
         localCounter++;
         return localCounter * PROPOSAL_STRIDE + idNum;
     }
 
+    /**
+     * Starts the council member server, listening for incoming messages on the configured port.
+     * Creates a daemon thread to accept incoming socket connections and process messages.
+     *
+     * @throws Exception if the server cannot bind to the configured port
+     */
     public void start() throws Exception {
         NetworkConfig.Entry me = cfg.map.get(myId);
         if (me == null) throw new IllegalArgumentException("No config for " + myId);
@@ -73,6 +95,12 @@ public class CouncilMember {
         System.out.printf("%s listening on %d at %s%n", myId, me.port, Instant.now());
     }
 
+    /**
+     * Handles an incoming socket connection by reading and processing a single message.
+     * Simulates network delays and packet loss based on the member's profile.
+     *
+     * @param s The socket connection to handle
+     */
     private void handleConnection(Socket s) {
         try (BufferedReader br = new BufferedReader(new InputStreamReader(s.getInputStream()))) {
             String line = br.readLine();
@@ -81,7 +109,7 @@ public class CouncilMember {
             if (profile.shouldDrop()) return;
             Message m = Message.parse(line);
             switch (m.type) {
-                case PROPOSE -> onProposeRequest(m);  // NEW
+                case PROPOSE -> onProposeRequest(m);
                 case PREPARE -> onPrepare(m);
                 case PROMISE -> onPromise(m);
                 case REJECT -> onReject(m);
@@ -91,14 +119,15 @@ public class CouncilMember {
                 default -> {}
             }
         } catch (Exception e) {
-            // Log parse errors for debugging
             log("ERROR parsing message: " + e.getMessage());
         }
     }
 
     /**
-     * Handle incoming PROPOSE request from external trigger.
-     * @param m The PROPOSE message containing candidate value
+     * Handles an incoming PROPOSE message from an external trigger (e.g., test script).
+     * This initiates a new Paxos round with the specified candidate value.
+     *
+     * @param m The PROPOSE message containing the candidate to nominate
      */
     private void onProposeRequest(Message m) {
         log("Received PROPOSE request for candidate: " + m.v);
@@ -106,8 +135,10 @@ public class CouncilMember {
     }
 
     /**
-     * Initiate Phase 1 for a value.
-     * @param value The candidate to propose for election
+     * Initiates Phase 1 of the Paxos algorithm by broadcasting PREPARE messages.
+     * If this member has the failure profile, it may crash after sending PREPARE.
+     *
+     * @param value The candidate value to propose (e.g., "M5")
      */
     public void propose(String value) {
         synchronized (proposerLock) {
@@ -120,21 +151,26 @@ public class CouncilMember {
             broadcast(Message.prepare(myId, n));
             logSend("BROADCAST", MessageType.PREPARE, "*", n, value, null, null, null);
 
-            // Crash simulation for failure profile
+            // Simulate crash for failure profile
             if (profile.shouldCrashAfterPrepare()) {
                 log("CRASH: Failure profile terminating after PREPARE");
-                // Schedule crash after a brief delay to allow PREPARE messages to be sent
                 sched.schedule(() -> {
                     log("EXITING NOW");
                     System.exit(1);
                 }, 100, TimeUnit.MILLISECONDS);
-                return; // Don't schedule timeout - we're crashing
+                return;
             }
 
             schedulePrepareTimeout(n);
         }
     }
 
+    /**
+     * Schedules a timeout for Phase 1 (PREPARE). If quorum is not reached within the timeout,
+     * the proposer retries with a higher proposal number.
+     *
+     * @param n The proposal number to monitor
+     */
     private void schedulePrepareTimeout(long n) {
         sched.schedule(() -> {
             synchronized (proposerLock) {
@@ -150,6 +186,12 @@ public class CouncilMember {
         }, PREPARE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     }
 
+    /**
+     * Schedules a timeout for Phase 2 (ACCEPT). If quorum is not reached within the timeout,
+     * the proposer retries with a higher proposal number.
+     *
+     * @param n The proposal number to monitor
+     */
     private void scheduleAcceptTimeout(long n) {
         sched.schedule(() -> {
             synchronized (proposerLock) {
@@ -165,6 +207,13 @@ public class CouncilMember {
         }, ACCEPT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     }
 
+    /**
+     * Handles an incoming PREPARE message as an acceptor in Phase 1.
+     * If a decision has already been reached, sends DECIDE to inform the proposer.
+     * Otherwise, responds with PROMISE if the proposal number is acceptable, or REJECT if not.
+     *
+     * @param m The PREPARE message from a proposer
+     */
     private void onPrepare(Message m) {
         if (decidedValue != null) {
             sendTo(m.from, Message.decide(myId, decidedValue));
@@ -185,6 +234,13 @@ public class CouncilMember {
         }
     }
 
+    /**
+     * Handles an incoming ACCEPT_REQUEST message as an acceptor in Phase 2.
+     * If a decision has already been reached, sends DECIDE to inform the proposer.
+     * Otherwise, accepts or rejects the proposal and broadcasts ACCEPTED if successful.
+     *
+     * @param m The ACCEPT_REQUEST message from a proposer
+     */
     private void onAcceptRequest(Message m) {
         if (decidedValue != null) {
             sendTo(m.from, Message.decide(myId, decidedValue));
@@ -215,6 +271,12 @@ public class CouncilMember {
         }
     }
 
+    /**
+     * Handles an incoming PROMISE message from an acceptor in Phase 1.
+     * Records the promise and checks if quorum has been reached to proceed to Phase 2.
+     *
+     * @param m The PROMISE message from an acceptor
+     */
     private void onPromise(Message m) {
         synchronized (proposerLock) {
             if (currentRound == null || m.n != currentRound.n || decidedValue != null) return;
@@ -228,12 +290,23 @@ public class CouncilMember {
         }
     }
 
+    /**
+     * Handles an incoming REJECT message from an acceptor.
+     * Records the higher proposal number to use when retrying.
+     *
+     * @param m The REJECT message from an acceptor
+     */
     private void onReject(Message m) {
         if (m.higherN != null && m.higherN >= 0) {
             onRejectedCore(m.higherN);
         }
     }
 
+    /**
+     * Records a rejection with a higher proposal number for future retry attempts.
+     *
+     * @param higherN The higher proposal number that caused the rejection
+     */
     private void onRejectedCore(long higherN) {
         synchronized (proposerLock) {
             if (currentRound == null || decidedValue != null) return;
@@ -241,6 +314,12 @@ public class CouncilMember {
         }
     }
 
+    /**
+     * Handles an incoming ACCEPTED message from an acceptor in Phase 2.
+     * Records the acceptance and checks if quorum has been reached to finalize the decision.
+     *
+     * @param m The ACCEPTED message from an acceptor
+     */
     private void onAccepted(Message m) {
         synchronized (proposerLock) {
             if (currentRound != null && m.n == currentRound.n) {
@@ -256,6 +335,12 @@ public class CouncilMember {
         }
     }
 
+    /**
+     * Handles an incoming DECIDE message as a learner.
+     * Records the final decision and relays it to other members to ensure consistency.
+     *
+     * @param m The DECIDE message containing the final elected value
+     */
     private void onDecide(Message m) {
         decideLocal(m.v);
         if (relayedDecisions.add(m.v)) {
@@ -265,6 +350,12 @@ public class CouncilMember {
         log("LEARN v=" + m.v);
     }
 
+    /**
+     * Records the final consensus decision locally and prints the result.
+     * This is called only once when consensus is reached.
+     *
+     * @param v The candidate that has been elected as council president
+     */
     private void decideLocal(String v) {
         if (decidedValue == null) {
             decidedValue = v;
@@ -272,6 +363,11 @@ public class CouncilMember {
         }
     }
 
+    /**
+     * Broadcasts a message to all other council members (excluding self).
+     *
+     * @param m The message to broadcast
+     */
     private void broadcast(Message m) {
         for (String id : cfg.map.keySet()) {
             if (!id.equals(myId)) {
@@ -280,14 +376,37 @@ public class CouncilMember {
         }
     }
 
+    /**
+     * Sends a message to a specific council member.
+     *
+     * @param id The member ID to send to
+     * @param m The message to send
+     */
     private void sendTo(String id, Message m) {
         NetUtil.sendTo(id, cfg, m);
     }
 
+    /**
+     * Logs a general message with timestamp.
+     *
+     * @param msg The message to log
+     */
     private void log(String msg) {
         System.out.printf("[%s] %s %s%n", myId, Instant.now(), msg);
     }
 
+    /**
+     * Logs a detailed message send/broadcast event with all Paxos parameters.
+     *
+     * @param action The action type (SEND, BROADCAST)
+     * @param t The message type
+     * @param to The recipient (or "*" for broadcast)
+     * @param n The proposal number
+     * @param v The proposed value
+     * @param aN The previously accepted proposal number (for PROMISE)
+     * @param aV The previously accepted value (for PROMISE)
+     * @param higherN The higher proposal number (for REJECT)
+     */
     private void logSend(String action, MessageType t, String to, long n, String v,
                          Long aN, String aV, Long higherN) {
         System.out.printf("[%s] %s %s to=%s n=%s v=%s aN=%s aV=%s higherN=%s @%s%n",
@@ -298,6 +417,13 @@ public class CouncilMember {
                 Instant.now());
     }
 
+    /**
+     * Main entry point for launching a council member process.
+     * Expects command-line arguments: memberId --profile profileName [--config configPath]
+     *
+     * @param args Command-line arguments
+     * @throws Exception if member cannot be started
+     */
     public static void main(String[] args) throws Exception {
         if (args.length < 3) {
             System.err.println("Usage: java council.CouncilMember <MemberId> --profile <reliable|latent|failure|standard> [--config network.config]");
