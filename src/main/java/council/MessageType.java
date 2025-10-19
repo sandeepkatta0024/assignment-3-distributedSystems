@@ -7,6 +7,6 @@ public enum MessageType {
     ACCEPT_REQUEST, // fields: from, n, v
     ACCEPTED,       // fields: from, n, v
     DECIDE,         // fields: from, v
-    PING,           // optional: liveness
-    PONG            // optional
+    PING,
+    PONG
 }
